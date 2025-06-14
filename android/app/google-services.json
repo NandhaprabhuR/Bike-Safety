@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "970461684556",
+    "project_id": "bike-safety-4edb0",
+    "storage_bucket": "bike-safety-4edb0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:970461684556:android:45239e1c0ec038779fa5e9",
+        "android_client_info": {
+          "package_name": "com.example.designthinking"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBsvBOWqSVhWD67HW5iVnC9y7GaN0vIFf4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
