@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:local_auth/error_codes.dart' as auth_error;
-import 'package:app_settings/app_settings.dart'; // Add for opening settings
 
 class BiometricService {
   final LocalAuthentication _auth = LocalAuthentication();
+  static const MethodChannel _channel = MethodChannel('com.example.designthinking/biometric');
 
   /// Check if biometric authentication is available
   Future<bool> canCheckBiometrics() async {
@@ -18,25 +19,27 @@ class BiometricService {
     }
   }
 
-  /// Check if any fingerprint is enrolled
-  Future<bool> hasFingerprintEnrolled() async {
+  /// Check if any biometric (e.g., fingerprint or Face ID) is enrolled
+  Future<bool> hasBiometricsEnrolled() async {
     try {
       final List<BiometricType> availableBiometrics = await _auth.getAvailableBiometrics();
-      final bool hasFingerprint = availableBiometrics.contains(BiometricType.fingerprint) ||
-          availableBiometrics.contains(BiometricType.strong);
-      debugPrint('Fingerprint enrolled: $hasFingerprint');
-      return hasFingerprint;
+      final bool hasBiometric = availableBiometrics.contains(BiometricType.fingerprint) ||
+          availableBiometrics.contains(BiometricType.strong) ||
+          availableBiometrics.contains(BiometricType.face);
+      debugPrint('Biometric enrolled: $hasBiometric');
+      return hasBiometric;
     } on PlatformException catch (e) {
       debugPrint('Error checking enrolled biometrics: $e');
       return false;
     }
   }
 
-  /// Open device security settings
+  /// Open device security settings using MethodChannel
   Future<bool> openSecuritySettings() async {
     try {
-      await AppSettings.openAppSettings(type: AppSettingsType.security);
-      return true;
+      final bool success = await _channel.invokeMethod('openSecuritySettings');
+      debugPrint('Opened security settings successfully: $success');
+      return success;
     } catch (e) {
       debugPrint('Error opening security settings: $e');
       return false;
@@ -65,7 +68,7 @@ class BiometricService {
           errorMessage = 'Biometric authentication is not available on this device.';
           break;
         case auth_error.notEnrolled:
-          errorMessage = 'No fingerprints enrolled. Please enroll a fingerprint in device settings.';
+          errorMessage = 'No biometrics enrolled. Please enroll a fingerprint or Face ID in device settings.';
           break;
         case auth_error.lockedOut:
           errorMessage = 'Biometric authentication is locked out. Please try again later or use device PIN.';

@@ -16,7 +16,13 @@ dependencies:
   image: ^3.0.0
   image_picker: ^1.1.2
   sensors_plus: ^5.0.1
-  vibration: ^1.7.4
+#  vibration: ^1.7.4
+  firebase_storage: ^12.4.7
+  logger: ^2.0.2
+  firebase_auth: ^5.1.1
+  google_sign_in: ^6.2.1
+  cloudinary_public: ^0.23.1
+  cloudinary: ^1.2.0
   http: ^1.2.1
   connectivity_plus: ^6.0.3
   cupertino_icons: ^1.0.8

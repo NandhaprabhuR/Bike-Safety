@@ -4,6 +4,9 @@ import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'dart:io';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:cloudinary_public/cloudinary_public.dart';
+import 'package:uuid/uuid.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // Add this import
 import 'biometric.dart';
 
 class FaceRecognitionScreen extends StatefulWidget {
@@ -21,65 +24,25 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
   bool _isFaceVerified = false;
   bool _isFingerprintVerified = false;
   String _errorMessage = '';
-  bool _isLoadingFaces = true;
 
-  List<String> _registeredFaces = [];
   String? _currentFaceFeature;
   late final FaceDetector _faceDetector;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final BiometricService _biometricService = BiometricService();
 
+  late final CloudinaryPublic cloudinary;
+
   @override
   void initState() {
     super.initState();
+    cloudinary = CloudinaryPublic('djtzb6cvj', 'bikefaceauth', cache: false);
     final options = FaceDetectorOptions(
       enableLandmarks: true,
+      enableClassification: true,
       performanceMode: FaceDetectorMode.accurate,
     );
     _faceDetector = FaceDetector(options: options);
-    _loadRegisteredFaces();
     _initializeCamera();
-  }
-
-  Future<void> _loadRegisteredFaces() async {
-    try {
-      final snapshot = await _firestore.collection('registered_faces').get();
-      final faces = snapshot.docs.map((doc) => doc['faceId'] as String).toList();
-      if (mounted) {
-        setState(() {
-          _registeredFaces = faces;
-          _isLoadingFaces = false;
-          print('Loaded ${faces.length} registered faces from Firestore at ${DateTime.now()}');
-        });
-      }
-    } catch (e, stackTrace) {
-      print('Error loading registered faces from Firestore: $e at ${DateTime.now()}');
-      print('Stack trace: $stackTrace');
-      if (mounted) {
-        setState(() {
-          _errorMessage = 'Failed to load registered faces: $e';
-          _isLoadingFaces = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _saveRegisteredFace(String faceId) async {
-    try {
-      await _firestore.collection('registered_faces').add({
-        'faceId': faceId,
-        'timestamp': FieldValue.serverTimestamp(),
-      });
-      print('Saved face ID to Firestore: $faceId at ${DateTime.now()}');
-    } catch (e, stackTrace) {
-      print('Error saving face ID to Firestore: $e at ${DateTime.now()}');
-      print('Stack trace: $stackTrace');
-      if (mounted) {
-        setState(() {
-          _errorMessage = 'Failed to save face ID: $e';
-        });
-      }
-    }
   }
 
   Future<void> _initializeCamera() async {
@@ -144,6 +107,79 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
     }
   }
 
+  Future<bool> _checkLiveness() async {
+    if (_controller == null || !_controller!.value.isInitialized) {
+      print('Camera not initialized for liveness check at ${DateTime.now()}');
+      return false;
+    }
+
+    try {
+      print('Starting liveness check at ${DateTime.now()}');
+      double? previousLeftEyeOpenProb;
+      double? previousRightEyeOpenProb;
+      double? previousHeadEulerAngleY;
+      bool livenessDetected = false;
+
+      for (int i = 0; i < 5; i++) {
+        final XFile imageFile = await _controller!.takePicture();
+        final InputImage inputImage = InputImage.fromFilePath(imageFile.path);
+        final List<Face> faces = await _faceDetector.processImage(inputImage);
+
+        if (faces.isEmpty) {
+          print('No face detected during liveness check (frame $i) at ${DateTime.now()}');
+          await File(imageFile.path).delete();
+          continue;
+        }
+
+        final Face face = faces.first;
+        double? leftEyeOpenProb = face.leftEyeOpenProbability;
+        double? rightEyeOpenProb = face.rightEyeOpenProbability;
+        double? headEulerAngleY = face.headEulerAngleY;
+
+        print('Frame $i: LeftEyeOpenProb: $leftEyeOpenProb, RightEyeOpenProb: $rightEyeOpenProb, HeadEulerAngleY: $headEulerAngleY at ${DateTime.now()}');
+
+        if (leftEyeOpenProb != null && rightEyeOpenProb != null) {
+          if (previousLeftEyeOpenProb != null && previousRightEyeOpenProb != null) {
+            double leftEyeChange = (leftEyeOpenProb - previousLeftEyeOpenProb).abs();
+            double rightEyeChange = (rightEyeOpenProb - previousRightEyeOpenProb).abs();
+
+            print('Eye change detected - Left: $leftEyeChange, Right: $rightEyeChange at ${DateTime.now()}');
+
+            if (leftEyeChange > 0.2 || rightEyeChange > 0.2) {
+              print('Liveness confirmed: Eye movement detected at ${DateTime.now()}');
+              livenessDetected = true;
+              break;
+            }
+          }
+          previousLeftEyeOpenProb = leftEyeOpenProb;
+          previousRightEyeOpenProb = rightEyeOpenProb;
+        }
+
+        if (headEulerAngleY != null && previousHeadEulerAngleY != null) {
+          double headAngleChange = (headEulerAngleY - previousHeadEulerAngleY).abs();
+          print('Head angle change detected - Yaw: $headAngleChange at ${DateTime.now()}');
+          if (headAngleChange > 5.0) {
+            print('Liveness confirmed: Head movement detected at ${DateTime.now()}');
+            livenessDetected = true;
+            break;
+          }
+        }
+        previousHeadEulerAngleY = headEulerAngleY;
+
+        await File(imageFile.path).delete();
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+
+      if (!livenessDetected) {
+        print('Liveness check failed: No significant eye or head movement detected at ${DateTime.now()}');
+      }
+      return livenessDetected;
+    } catch (e) {
+      print('Error during liveness check: $e at ${DateTime.now()}');
+      return false;
+    }
+  }
+
   Future<bool> _detectFace(XFile imageFile) async {
     try {
       final file = File(imageFile.path);
@@ -152,7 +188,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
         return false;
       }
 
-      final inputImage = InputImage.fromFilePath(imageFile.path);
+      final InputImage inputImage = InputImage.fromFilePath(imageFile.path);
       final List<Face> faces = await _faceDetector.processImage(inputImage);
 
       if (faces.isEmpty) {
@@ -160,7 +196,13 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
         return false;
       }
 
-      _currentFaceFeature = 'mock_face_${DateTime.now().hour}_${DateTime.now().minute}';
+      bool isLive = await _checkLiveness();
+      if (!isLive) {
+        print('Liveness check failed: Not a live human face at ${DateTime.now()}');
+        return false;
+      }
+
+      _currentFaceFeature = 'mock_face_58.22';
       print('Face detected, feature extracted: $_currentFaceFeature at ${DateTime.now()}');
       return true;
     } catch (e, stackTrace) {
@@ -172,45 +214,133 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
 
   String _generateMockFaceId() {
     if (_currentFaceFeature == null) {
-      return 'unknown_face_${DateTime.now().millisecondsSinceEpoch}';
+      return 'mock_face_${DateTime.now().millisecondsSinceEpoch % 100}.22';
     }
     return _currentFaceFeature!;
   }
 
   Future<bool> _isFaceRegistered(String faceId) async {
-    if (_registeredFaces.isEmpty) {
-      print('No faces registered yet at ${DateTime.now()}');
+    try {
+      final snapshot = await _firestore
+          .collection('registered_faces')
+          .where('faceId', isEqualTo: faceId)
+          .get();
+      bool isRegistered = snapshot.docs.isNotEmpty;
+      print('Face ID $faceId is ${isRegistered ? '' : 'not '}registered at ${DateTime.now()}');
+      return isRegistered;
+    } catch (e) {
+      print('Error checking if face is registered: $e at ${DateTime.now()}');
       return false;
     }
-    bool isRegistered = _registeredFaces.contains(faceId);
-    print('Face ID $faceId is ${isRegistered ? '' : 'not '}registered at ${DateTime.now()}');
-    return isRegistered;
   }
 
-  void _showResultDialog(String title, String message, {bool navigateBack = false, VoidCallback? onClose}) {
+  Future<String?> _getUserStatus(String faceId) async {
+    try {
+      final snapshot = await _firestore
+          .collection('registered_faces')
+          .where('faceId', isEqualTo: faceId)
+          .get();
+      if (snapshot.docs.isEmpty) {
+        print('No user found with faceId: $faceId at ${DateTime.now()}');
+        return null;
+      }
+      final userDoc = snapshot.docs.first;
+      final data = userDoc.data();
+      final status = data.containsKey('status') ? data['status'] as String? : null;
+      final result = status ?? 'pending';
+      print('User status for faceId $faceId: $result at ${DateTime.now()}');
+      return result;
+    } catch (e) {
+      print('Error fetching user status: $e at ${DateTime.now()}');
+      return null;
+    }
+  }
+
+  Future<void> _startVehicle(String faceId) async {
+    print('Vehicle started for user $faceId at ${DateTime.now()}');
+
+    final userSnapshot = await _firestore
+        .collection('registered_faces')
+        .where('faceId', isEqualTo: faceId)
+        .get();
+
+    if (userSnapshot.docs.isNotEmpty) {
+      final userDoc = userSnapshot.docs.first;
+      await userDoc.reference.update({
+        'hasStartedVehicle': true,
+        'lastStartVehicle': FieldValue.serverTimestamp(),
+      });
+      print('Updated Firestore: hasStartedVehicle set to true for faceId: $faceId at ${DateTime.now()}');
+    }
+  }
+
+  Future<void> _saveRegisteredFace(String faceId, String? photoUrl) async {
+    try {
+      await _firestore.collection('registered_faces').add({
+        'faceId': faceId,
+        'photoUrl': photoUrl,
+        'timestamp': FieldValue.serverTimestamp(),
+        'hasStartedVehicle': false,
+        'status': 'pending',
+        'currentRequestId': null,
+      });
+      print('Saved face ID to Firestore: $faceId with photoUrl: $photoUrl at ${DateTime.now()}');
+
+      await _firestore.collection('face_notifications').add({
+        'faceId': faceId,
+        'photoUrl': photoUrl,
+        'timestamp': FieldValue.serverTimestamp(),
+        'message': 'New face registered: $faceId',
+      });
+      print('Logged face registration notification for faceId: $faceId at ${DateTime.now()}');
+    } catch (e, stackTrace) {
+      print('Error saving face ID to Firestore: $e at ${DateTime.now()}');
+      print('Stack trace: $stackTrace');
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Failed to save face ID: $e';
+        });
+      }
+    }
+  }
+
+  void _showResultDialog(String title, String message, {bool navigateBack = false, VoidCallback? onClose, Map<String, dynamic>? result}) {
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (BuildContext context) {
         return AlertDialog(
-          title: Text(title),
-          content: Text(message),
-          backgroundColor: const Color(0xFFF5F0E5),
+          title: Text(
+            title,
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
+          content: Text(
+            message,
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurface.withOpacity(0.8),
+            ),
+          ),
+          backgroundColor: Theme.of(context).cardTheme.color,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
+            side: BorderSide(color: Theme.of(context).dividerColor),
           ),
           actions: [
             TextButton(
               onPressed: () {
                 Navigator.of(context).pop();
                 if (navigateBack) {
-                  Navigator.pop(context, true);
+                  Navigator.pop(context, result);
                 }
                 onClose?.call();
               },
-              child: const Text(
+              child: Text(
                 'OK',
-                style: TextStyle(color: Color(0xFF3E3A36)),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
               ),
             ),
           ],
@@ -240,16 +370,16 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
       print('Image captured at ${imageFile.path} at ${DateTime.now()}');
 
       bool faceDetected = await _detectFace(imageFile);
-      await File(imageFile.path).delete();
       if (!faceDetected) {
         setState(() {
-          _errorMessage = 'No face detected. Only human faces can be verified.';
+          _errorMessage = 'No live human face detected. Only live human faces can be verified.';
           _isCapturing = false;
         });
         _showResultDialog(
           'Verification Failed',
-          'No human face detected in the image. Random objects (e.g., room, fan) are not allowed. Please ensure a face is present and try again.',
+          'No live human face detected in the image. Photos, computer images, or non-human objects are not allowed. Please ensure a live human face is present and try again.',
         );
+        await File(imageFile.path).delete();
         return;
       }
 
@@ -264,7 +394,51 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
           'Verification Failed',
           'This face is not registered. Please register the face first.',
         );
+        await File(imageFile.path).delete();
         return;
+      }
+
+      String? photoUrl;
+      try {
+        final response = await cloudinary.uploadFile(
+          CloudinaryFile.fromFile(
+            imageFile.path,
+            folder: 'face_images',
+            resourceType: CloudinaryResourceType.Image,
+          ),
+        );
+        photoUrl = response.secureUrl;
+        print('Uploaded face image to Cloudinary: $photoUrl at ${DateTime.now()}');
+      } catch (e) {
+        print('Error uploading face image to Cloudinary: $e at ${DateTime.now()}');
+        setState(() {
+          _errorMessage = 'Failed to upload face image: $e';
+          _isCapturing = false;
+        });
+        _showResultDialog(
+          'Upload Failed',
+          'Failed to upload face image: $e. Face verification cannot proceed.',
+        );
+        await File(imageFile.path).delete();
+        return;
+      } finally {
+        await File(imageFile.path).delete();
+      }
+
+      try {
+        final snapshot = await _firestore
+            .collection('registered_faces')
+            .where('faceId', isEqualTo: faceId)
+            .get();
+        if (snapshot.docs.isNotEmpty) {
+          await snapshot.docs.first.reference.update({
+            'photoUrl': photoUrl,
+            'lastStartVehicle': FieldValue.serverTimestamp(),
+          });
+          print('Updated Firestore with new photoUrl for faceId: $faceId at ${DateTime.now()}');
+        }
+      } catch (e) {
+        print('Error updating Firestore with photoUrl: $e at ${DateTime.now()}');
       }
 
       await Future.delayed(const Duration(seconds: 2));
@@ -303,7 +477,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
     }
   }
 
-  Future<void> _verifyFingerprintAndStartVehicle() async {
+  Future<Map<String, dynamic>?> _verifyFingerprintAndStartVehicle() async {
     if (!_isFaceVerified) {
       setState(() {
         _errorMessage = 'Please verify your face first.';
@@ -312,7 +486,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
         'Face Verification Required',
         'Please verify your face before proceeding with fingerprint verification.',
       );
-      return;
+      return null;
     }
 
     setState(() {
@@ -320,70 +494,170 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
       _errorMessage = '';
     });
 
-    // Check if fingerprint is enrolled
-    bool hasFingerprint = await _biometricService.hasFingerprintEnrolled();
-    if (!hasFingerprint) {
-      setState(() {
-        _isCapturing = false;
-      });
-
-      // Prompt user to enroll a fingerprint or troubleshoot
-      bool openedSettings = await _biometricService.hasFingerprintEnrolled();
-      if (openedSettings) {
+    try {
+      bool? canAuthenticate = await _biometricService.canCheckBiometrics();
+      if (canAuthenticate == null || !canAuthenticate) {
+        setState(() {
+          _isCapturing = false;
+          _errorMessage = 'Biometric authentication is not available on this device.';
+        });
         _showResultDialog(
-          'Biometric Setup',
-          'Unable to detect enrolled fingerprint. Please ensure a fingerprint is enrolled in your device settings (e.g., Settings > Security > Fingerprint or Biometrics and Security > Fingerprints), then return and try again. If you’ve already enrolled a fingerprint, try re-enrolling it.',
+          'Biometric Unavailable',
+          'This device does not support biometric authentication or it is disabled. Please enable biometrics in your device settings.',
+        );
+        return null;
+      }
+
+      bool? hasBiometric = await _biometricService.hasBiometricsEnrolled();
+      if (hasBiometric == null || !hasBiometric) {
+        setState(() {
+          _isCapturing = false;
+          _errorMessage = 'No biometric enrolled. Please enroll a fingerprint or Face ID in device settings.';
+        });
+        bool openedSettings = await _biometricService.openSecuritySettings() ?? false;
+        String message = openedSettings
+            ? 'Please enroll a fingerprint or Face ID in your device settings (e.g., Settings > Security > Fingerprint) and try again.'
+            : 'Failed to open settings. Please go to your device settings manually to enroll a biometric.';
+        _showResultDialog(
+          'Biometric Required',
+          message,
           onClose: () async {
-            // Recheck fingerprint enrollment after user returns from settings
-            bool hasFingerprintAfterSettings = await _biometricService.hasFingerprintEnrolled();
-            if (hasFingerprintAfterSettings) {
-              // If a fingerprint is now enrolled, automatically trigger verification
-              _verifyFingerprintAndStartVehicle();
+            if (openedSettings) {
+              bool? hasBiometricAfterSettings = await _biometricService.hasBiometricsEnrolled();
+              if (hasBiometricAfterSettings == true) {
+                await _verifyFingerprintAndStartVehicle();
+              }
             }
           },
         );
-      } else {
-        setState(() {
-          _errorMessage = 'Failed to open device settings. Please check your fingerprint settings manually.';
-        });
-        _showResultDialog(
-          'Error',
-          'Failed to open device settings. Please go to your device settings (e.g., Settings > Security > Fingerprint or Biometrics and Security > Fingerprints) to ensure a fingerprint is enrolled, then try again.',
-        );
+        return null;
       }
-      return;
-    }
 
-    // Proceed with fingerprint verification if a fingerprint is enrolled
-    bool fingerprintVerified = await _biometricService.verifyFingerprint();
-    setState(() {
-      _isCapturing = false;
-      _isFingerprintVerified = fingerprintVerified;
-    });
-
-    if (fingerprintVerified) {
-      _showResultDialog(
-        'Verification Complete',
-        'Both face and fingerprint verified successfully! Vehicle started.',
-        navigateBack: true,
-      );
-    } else {
-      bool canCheckBiometrics = await _biometricService.canCheckBiometrics();
-      String errorMessage;
-
-      if (!canCheckBiometrics) {
-        errorMessage = 'Biometric authentication is not available on this device. Please ensure biometrics are enabled in your device settings.';
-      } else {
-        errorMessage = 'Fingerprint verification failed. Please try again or ensure your fingerprint sensor is working correctly.';
+      bool? fingerprintVerified = await _biometricService.verifyFingerprint();
+      if (fingerprintVerified == null) {
+        throw Exception('Fingerprint verification returned null unexpectedly.');
       }
 
       setState(() {
-        _errorMessage = errorMessage;
+        _isCapturing = false;
+        _isFingerprintVerified = fingerprintVerified;
+      });
+
+      if (fingerprintVerified) {
+        try {
+          final faceId = _generateMockFaceId();
+          final snapshot = await _firestore
+              .collection('registered_faces')
+              .where('faceId', isEqualTo: faceId)
+              .get();
+          if (snapshot.docs.isNotEmpty) {
+            final userDoc = snapshot.docs.first;
+            final userData = userDoc.data();
+            String? photoUrl = userData['photoUrl'];
+
+            final userStatus = await _getUserStatus(faceId);
+            if (userStatus == null) {
+              setState(() {
+                _errorMessage = 'User not found. Please register the face first.';
+              });
+              _showResultDialog(
+                'Permission Error',
+                'User not found in the database. Please register the face first.',
+              );
+              return null;
+            }
+
+            final requestId = const Uuid().v4();
+
+            final existingPermissions = await _firestore
+                .collection('pending_permissions')
+                .where('faceId', isEqualTo: faceId)
+                .where('status', isEqualTo: 'pending')
+                .get();
+
+            if (existingPermissions.docs.isEmpty) {
+              await _firestore.collection('pending_permissions').add({
+                'faceId': faceId,
+                'photoUrl': photoUrl,
+                'timestamp': FieldValue.serverTimestamp(),
+                'status': 'pending',
+                'requestId': requestId,
+              });
+              print('Logged pending permission for faceId: $faceId with requestId: $requestId at ${DateTime.now()}');
+            } else {
+              print('Pending permission already exists for faceId: $faceId at ${DateTime.now()}');
+              final existingDoc = existingPermissions.docs.first;
+              await existingDoc.reference.update({
+                'requestId': requestId,
+                'timestamp': FieldValue.serverTimestamp(),
+              });
+            }
+
+            await userDoc.reference.update({
+              'currentRequestId': requestId,
+              'status': 'pending',
+            });
+
+            // Save faceId and requestId to SharedPreferences
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('lastFaceId', faceId);
+            await prefs.setString('lastRequestId', requestId);
+            print('Saved faceId: $faceId and requestId: $requestId to SharedPreferences at ${DateTime.now()}');
+
+            _showResultDialog(
+              'Verification Complete',
+              'Both face and fingerprint verified successfully! Awaiting permission approval from the owner.',
+              navigateBack: true,
+              result: {
+                'faceId': faceId,
+                'requestId': requestId,
+              },
+            );
+            return {
+              'faceId': faceId,
+              'requestId': requestId,
+            };
+          } else {
+            setState(() {
+              _errorMessage = 'User not found. Please register the face first.';
+            });
+            _showResultDialog(
+              'Permission Error',
+              'User not found in the database. Please register the face first.',
+            );
+            return null;
+          }
+        } catch (e) {
+          print('Error logging pending permission in Firestore: $e at ${DateTime.now()}');
+          setState(() {
+            _errorMessage = 'Failed to request permission: $e';
+          });
+          _showResultDialog(
+            'Permission Request Failed',
+            'Failed to request permission: $e',
+          );
+          return null;
+        }
+      } else {
+        setState(() {
+          _errorMessage = 'Fingerprint verification failed. Please try again.';
+        });
+        _showResultDialog(
+          'Fingerprint Verification Failed',
+          'Fingerprint verification failed. Please try again or check your fingerprint sensor.',
+        );
+        return null;
+      }
+    } catch (e) {
+      setState(() {
+        _isCapturing = false;
+        _errorMessage = e.toString().replaceFirst('Exception: ', '');
       });
       _showResultDialog(
-        'Fingerprint Verification Failed',
-        errorMessage,
+        'Fingerprint Verification Error',
+        _errorMessage,
       );
+      return null;
     }
   }
 
@@ -408,16 +682,16 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
       print('Image captured for registration at ${imageFile.path} at ${DateTime.now()}');
 
       bool faceDetected = await _detectFace(imageFile);
-      await File(imageFile.path).delete();
       if (!faceDetected) {
         setState(() {
-          _errorMessage = 'No face detected. Only human faces can be registered.';
+          _errorMessage = 'No live human face detected. Only live human faces can be registered.';
           _isCapturing = false;
         });
         _showResultDialog(
           'Registration Failed',
-          'No human face detected in the image. Random objects (e.g., room, fan) are not allowed. Please ensure a face is present and try again.',
+          'No live human face detected in the image. Photos, computer images, or non-human objects are not allowed. Please ensure a live human face is present and try again.',
         );
+        await File(imageFile.path).delete();
         return;
       }
 
@@ -432,11 +706,38 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
           'Registration Failed',
           'This face is already registered. Please verify instead.',
         );
+        await File(imageFile.path).delete();
         return;
       }
 
-      _registeredFaces.add(faceId);
-      await _saveRegisteredFace(faceId);
+      String? photoUrl;
+      try {
+        final response = await cloudinary.uploadFile(
+          CloudinaryFile.fromFile(
+            imageFile.path,
+            folder: 'face_images',
+            resourceType: CloudinaryResourceType.Image,
+          ),
+        );
+        photoUrl = response.secureUrl;
+        print('Uploaded face image to Cloudinary: $photoUrl at ${DateTime.now()}');
+      } catch (e) {
+        print('Error uploading face image to Cloudinary: $e at ${DateTime.now()}');
+        setState(() {
+          _errorMessage = 'Failed to upload face image: $e';
+          _isCapturing = false;
+        });
+        _showResultDialog(
+          'Upload Failed',
+          'Failed to upload face image: $e. Face registration cannot proceed.',
+        );
+        await File(imageFile.path).delete();
+        return;
+      } finally {
+        await File(imageFile.path).delete();
+      }
+
+      await _saveRegisteredFace(faceId, photoUrl);
       print('Face registered successfully with ID: $faceId at ${DateTime.now()}');
 
       setState(() {
@@ -465,26 +766,17 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoadingFaces) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
-    }
-    if (_errorMessage.contains('Failed to load registered faces')) {
-      return Scaffold(
-        body: Center(
-          child: Text('Error loading faces: $_errorMessage'),
-        ),
-      );
-    }
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F0E5),
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: AppBar(
         title: const Text('Face Recognition'),
+        backgroundColor: Theme.of(context).appBarTheme.backgroundColor,
+        foregroundColor: Theme.of(context).appBarTheme.foregroundColor,
+        elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () {
-            Navigator.pop(context, false);
+            Navigator.pop(context, null);
           },
         ),
       ),
@@ -546,70 +838,81 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                 : const CircularProgressIndicator(),
             const SizedBox(height: 24),
             if (!_isFaceVerified && _isCameraInitialized && !_isCapturing)
-              Row(
+              Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  ElevatedButton.icon(
-                    onPressed: _isCapturing ? null : _captureAndVerifyFace,
-                    icon: const Icon(Icons.check, size: 20),
-                    label: const Text('Verify Face'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFD0C3A6),
-                      foregroundColor: const Color(0xFF3E3A36),
-                      padding: const EdgeInsets.symmetric(
-                          vertical: 14, horizontal: 24),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _isCapturing ? null : _captureAndVerifyFace,
+                      icon: const Icon(Icons.check, size: 20),
+                      label: const Text('Verify Face'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Theme.of(context).colorScheme.secondary,
+                        foregroundColor: Theme.of(context).colorScheme.onSecondary,
+                        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
                     ),
                   ),
-                  const SizedBox(width: 20),
-                  ElevatedButton.icon(
-                    onPressed: _isCapturing ? null : _registerFace,
-                    icon: const Icon(Icons.person_add, size: 20),
-                    label: const Text('Register Face'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFD0C3A6),
-                      foregroundColor: const Color(0xFF3E3A36),
-                      padding: const EdgeInsets.symmetric(
-                          vertical: 14, horizontal: 24),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _isCapturing ? null : _registerFace,
+                      icon: const Icon(Icons.person_add, size: 20),
+                      label: const Text('Register Face'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Theme.of(context).colorScheme.secondary,
+                        foregroundColor: Theme.of(context).colorScheme.onSecondary,
+                        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
                     ),
                   ),
                 ],
               ),
             if (_isFaceVerified && !_isFingerprintVerified && _isCameraInitialized && !_isCapturing)
-              ElevatedButton.icon(
-                onPressed: _isCapturing ? null : _verifyFingerprintAndStartVehicle,
-                icon: const Icon(Icons.fingerprint, size: 20),
-                label: const Text('Verify Fingerprint'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFD0C3A6),
-                  foregroundColor: const Color(0xFF3E3A36),
-                  padding: const EdgeInsets.symmetric(
-                      vertical: 14, horizontal: 24),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _isCapturing
+                      ? null
+                      : () async {
+                    await _verifyFingerprintAndStartVehicle();
+                  },
+                  icon: const Icon(Icons.fingerprint, size: 20),
+                  label: const Text('Verify Fingerprint'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Theme.of(context).colorScheme.secondary,
+                    foregroundColor: Theme.of(context).colorScheme.onSecondary,
+                    padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                   ),
                 ),
               ),
             const SizedBox(height: 16),
             if (!_isFaceVerified && _isCameraInitialized && !_isCapturing)
-              const Text(
-                'Position your face within the rectangle and press verify',
+              Text(
+                'Position your face within the rectangle, blink your eyes or tilt your head, and press verify',
                 style: TextStyle(
                   fontSize: 16,
-                  color: Color(0xFF3E3A36),
+                  color: Theme.of(context).colorScheme.onSurface,
                 ),
+                textAlign: TextAlign.center,
               ),
             if (_isFaceVerified && !_isFingerprintVerified && _isCameraInitialized && !_isCapturing)
-              const Text(
-                'Please verify your fingerprint to start the vehicle',
+              Text(
+                'Please verify your fingerprint to proceed',
                 style: TextStyle(
                   fontSize: 16,
-                  color: Color(0xFF3E3A36),
+                  color: Theme.of(context).colorScheme.onSurface,
                 ),
               ),
           ],

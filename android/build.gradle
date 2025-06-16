@@ -1,10 +1,15 @@
 buildscript {
+    ext.kotlin_version = '2.1.0' // ✅ Add this line
+
     repositories {
         google()
         mavenCentral()
     }
+
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.2.0'
+        classpath "com.android.tools.build:gradle:8.2.0"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version" // ✅ Add this line
+        classpath "com.google.gms:google-services:4.4.2"
     }
 }
 
@@ -16,6 +21,7 @@ allprojects {
 }
 
 rootProject.buildDir = "../build"
+
 subprojects {
     project.buildDir = "${rootProject.buildDir}/${project.name}"
 }
